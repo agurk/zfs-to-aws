@@ -4,15 +4,14 @@ set -o nounset
 #set -o errexit
 set -o pipefail
 
-BUCKET='timothymoll.zfs.backups'
-AWS_REGION='eu-north-1'
+BUCKET=
+AWS_REGION=
 BACKUP_PATH=$(hostname -f)
 
+DEFAULT_INCREMENTAL_FROM_INCREMENTAL=1
+DEFAULT_MAX_INCREMENTAL_BACKUPS=100
+DEFAULT_SNAPSHOT_TYPES="zfs-auto-snap_monthly"
 #SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_daily\|zfs-auto-snap_weekly\|zfs-auto-snap_monthly"
-SNAPSHOT_TYPES="zfs-auto-snap_monthly"
-
-MAX_INCREMENTAL_BACKUPS=100
-INCREMENTAL_FROM_INCREMENTAL=1
 
 OPT_CONFIG_FILE='s3backup.conf'
 OPT_DEBUG=""
@@ -87,10 +86,82 @@ function print_log # level, message, ...
     esac
 }
 
+function load_config
+{
+    if [[ ! -f $OPT_CONFIG_FILE ]]
+    then
+        print_log critical "Missing config file $OPT_CONFIG_FILE"
+        exit 1
+    fi
+
+    local in_ds=0
+    local ds_name=''
+    local ds_ss_types=$DEFAULT_SNAPSHOT_TYPES
+    local ds_max_inc=$DEFAULT_MAX_INCREMENTAL_BACKUPS
+    local ds_inc_inc=$DEFAULT_INCREMENTAL_FROM_INCREMENTAL
+
+
+    for line in $( IFS=$'\n' ; cat $OPT_CONFIG_FILE)
+    do
+        arg=$(echo $line | awk -F= {'print $1'})
+        val=$(echo $line | awk -F= {'print $2'})
+
+        print_log debug "config line: $line"
+        print_log debug " -- has arg \"$arg\" and val \"$val\""
+
+        if [[ $in_ds == 0  && $arg == 'bucket' ]]
+        then
+            BUCKET=$val
+        elif [[ $in_ds == 0 && $arg == 'region' ]]
+        then
+            AWS_REGION=$val
+        elif [[ $in_ds == 0 && $arg == 'backup_path' ]]
+        then
+            BACKUP_PATH=$val
+        elif [[ $arg == '[dataset]' ]]
+        then
+            # Checking bucket here as this is the opportunity when the non-dataset config has finally been loaded
+            if [[ $in_ds == 0 ]]
+            then
+                check_aws_bucket
+            elif [[ $in_ds == 1 && $ds_name ]]
+            then
+                print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
+                backup_dataset "$ds_name" "$ds_ss_types" "$ds_max_inc" "$ds_inc_inc"
+            fi
+            in_ds=1
+            ds_name=''
+            ds_ss_types=$DEFAULT_SNAPSHOT_TYPES
+            ds_max_inc=$DEFAULT_MAX_INCREMENTAL_BACKUPS
+            ds_inc_inc=$DEFAULT_INCREMENTAL_FROM_INCREMENTAL
+        elif [[ $arg == 'name' ]]
+        then
+            ds_name=$val
+        elif [[ $arg == 'snapshot_types' ]]
+        then
+            ds_ss_types=$val
+        elif [[ $arg == 'max_incremental_backups' ]]
+        then
+            ds_max_inc=$val
+        elif [[ $arg == 'incremental_incremental' ]]
+        then
+            ds_inc_inc=$val
+        fi
+    done
+
+    print_log debug "Finished reading config file"
+
+    if [[ $in_ds == 1 && $ds_name ]]
+    then
+        print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
+        backup_dataset "$ds_name" "$ds_ss_types" "$ds_max_inc" "$ds_inc_inc"
+    fi
+}
+
 function check_aws_bucket
 {
     print_log debug "Starting check that AWS bucket exists"
-    check_set "Missing bucket name" $BUCKET
+    check_set "AWS bucket name not set" $BUCKET
     local bucket_ls=$( aws s3 ls $BUCKET 2>&1 )
     if [[ $bucket_ls =~ 'An error occurred (AccessDenied)' ]]
     then
@@ -132,11 +203,11 @@ function incremental_backup
     local increment_from_file=${7-}
     local backup_seq=${8-}
 
-    local snapshot_size=$( /sbin/zfs send --raw --nvPDci $increment_from $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size=$( /sbin/zfs send --raw -nvPDci $increment_from $snapshot | awk '/size/ {print $2}' )
 
     print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size bytes)"
 
-    echo "/sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
         --metadata=FullSnapshot=false,\
 Snapshot=$snapshot,\
@@ -145,7 +216,7 @@ LastFullSnapshotFile=$last_full_snapshot_file,\
 IncrementFrom=$increment_from,\
 IncrementFromFile=$increment_from_file,\
 BackupSeq=$backup_seq,\
-Dedup=true,Lz4comp=true  "
+Dedup=true,Lz4comp=true 
 }
 
 function full_backup
@@ -158,7 +229,7 @@ function full_backup
 
     print_log notice "Performing full backup of $snapshot ($snapshot_size bytes)"
 
-    echo "/sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
         --metadata=FullSnapshot=true,\
 Snapshot=$snapshot,\
@@ -167,18 +238,30 @@ LastFullSnapshotFile=$filename,\
 IncrementFrom=$snapshot,\
 IncrementFromFile=$filename,\
 BackupSeq=0,\
-Dedup=true,Lz4comp=true "
+Dedup=true,Lz4comp=true
 }
 
 function backup_dataset
 {
     local dataset=${1-}
-    check_set "Missing dataset name" $dataset
+    if [[ -z $( /sbin/zfs list -Ho name | grep "^$dataset$" ) ]]
+    then
+        print_log error "Requested dataset $dataset from $OPT_CONFIG_FILE does not exist"
+        return
+    fi
+
+    local snapshot_types=${2-$DEFAULT_SNAPSHOT_TYPES}
+    local max_incremental_backups=${3-$DEFAULT_MAX_INCREMENTAL_BACKUPS}
+    local incremental_from_incremental=${4-$DEFAULT_INCREMENTAL_FROM_INCREMENTAL}
+
+    print_log info ""
+    print_log info "Running backup for dataset: $dataset, ss_types: $snapshot_types, max_increment: $max_incremental_backups, inc_from_inc: $incremental_from_incremental"
+
     local backup_path="$BACKUP_PATH/$dataset" 
     check_aws_folder $backup_path
 
     local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort  -r | head -1 | awk '{print $4}' )
-    local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $SNAPSHOT_TYPES | sort -n -k2 | tail -1 | awk '{print $1}' )
+    local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
 
     if [[ -z $latest_snapshot ]]
@@ -199,7 +282,7 @@ function backup_dataset
         local increment_from=$(echo $remote_meta | jq -r ".Metadata.snapshot")
         local increment_from_filename=$latest_remote_file
 
-        if [[ $INCREMENTAL_FROM_INCREMENTAL -ne 1 ]]
+        if [[ $incremental_from_incremental -ne 1 ]]
         then
             print_log info "Incremental incrementals turned off"
             increment_from=$last_full
@@ -211,7 +294,7 @@ function backup_dataset
             increment_from_filename=$last_full_filename
         fi
 
-        if [[ $backup_seq -gt $MAX_INCREMENTAL_BACKUPS ]]
+        if [[ $backup_seq -gt $max_incremental_backups ]]
         then
             print_log notice "Max number of incrementals reached for $dataset"
             full_backup $latest_snapshot $backup_path $remote_filename
@@ -272,17 +355,5 @@ do
     esac
 done
 
-check_aws_bucket
-
-for dataset in $( IFS=$'\n' ; cat $OPT_CONFIG_FILE)
-do
-    if [[ -z $( /sbin/zfs list -Ho name | grep "^$dataset$" ) ]]
-    then
-        print_log error "Requested dataset $dataset from $OPT_CONFIG_FILE does not exist"
-    else
-        print_log info ""
-        print_log info "Processing dataset $dataset"
-        backup_dataset $dataset
-    fi
-done
+load_config
 
