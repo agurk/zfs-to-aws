@@ -14,7 +14,7 @@ SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_dail
 MAX_INCREMENTAL_BACKUPS=100
 INCREMENTAL_FROM_INCREMENTAL=0
 
-VERBOSE=1
+VERBOSE=0
 
 function check_set
 {
@@ -135,7 +135,6 @@ function backup_dataset
     then
         echo "Backup is already at current version"
     else
-        echo " aws s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file | jq ".Metadata.lastfullsnapshot" "
         local remote_meta=$( aws s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
         local last_full=$(echo $remote_meta| jq -r ".Metadata.lastfullsnapshot")
         local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.lastfullsnapshotfile")
