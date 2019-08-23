@@ -1,24 +1,22 @@
 #!/bin/bash
 
 set -o nounset
-#set -o errexit
 set -o pipefail
 
 BUCKET=
 AWS_REGION=
 BACKUP_PATH=$(hostname -f)
 
-DEFAULT_INCREMENTAL_FROM_INCREMENTAL=1
+DEFAULT_INCREMENTAL_FROM_INCREMENTAL=0
 DEFAULT_MAX_INCREMENTAL_BACKUPS=100
 DEFAULT_SNAPSHOT_TYPES="zfs-auto-snap_monthly"
-#SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_daily\|zfs-auto-snap_weekly\|zfs-auto-snap_monthly"
 
 OPT_CONFIG_FILE='s3backup.conf'
-OPT_DEBUG=""
+OPT_DEBUG=''
 OPT_PREFIX="zfs-backup"
-OPT_QUIET=""
-OPT_SYSLOG=""
-OPT_VERBOSE=""
+OPT_QUIET=''
+OPT_SYSLOG=''
+OPT_VERBOSE=''
 
 function print_usage
 {
@@ -100,8 +98,7 @@ function load_config
     local ds_max_inc=$DEFAULT_MAX_INCREMENTAL_BACKUPS
     local ds_inc_inc=$DEFAULT_INCREMENTAL_FROM_INCREMENTAL
 
-
-    for line in $( IFS=$'\n' ; cat $OPT_CONFIG_FILE)
+    IFS=$'\n'; for line in $( cat $OPT_CONFIG_FILE )
     do
         arg=$(echo $line | awk -F= {'print $1'})
         val=$(echo $line | awk -F= {'print $2'})
