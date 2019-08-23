@@ -12,7 +12,7 @@ DATASETS_CONF='s3backup.conf'
 SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_daily\|zfs-auto-snap_weekly\|zfs-auto-snap_monthly"
 
 MAX_INCREMENTAL_BACKUPS=100
-INCREMENTAL_FROM_INCREMENTAL=0
+INCREMENTAL_FROM_INCREMENTAL=1
 
 VERBOSE=0
 
@@ -145,7 +145,7 @@ function backup_dataset
             full_backup $latest_snapshot $backup_path $remote_filename
         elif [[ $INCREMENTAL_FROM_INCREMENTAL -eq 1  ]] 
         then
-            local increment_from=$(echo $remote_meta | jr -r ".Metadata.snapshot")
+            local increment_from=$(echo $remote_meta | jq -r ".Metadata.snapshot")
             incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $latest_remote_file $backup_seq
         else
             incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $last_full $last_full_filename $backup_seq
