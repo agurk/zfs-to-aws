@@ -4,12 +4,13 @@ set -o nounset
 #set -o errexit
 set -o pipefail
 
-BUCKET='zfs.test'
+BUCKET='timothymoll.zfs.backups'
 AWS_REGION='eu-north-1'
 BACKUP_PATH=$(hostname -f)
 DATASETS_CONF='s3backup.conf'
 
-SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_daily\|zfs-auto-snap_weekly\|zfs-auto-snap_monthly"
+#SNAPSHOT_TYPES="zfs-auto-snap_frequent\|zfs-auto-snap_hourly\|zfs-auto-snap_daily\|zfs-auto-snap_weekly\|zfs-auto-snap_monthly"
+SNAPSHOT_TYPES="zfs-auto-snap_monthly"
 
 MAX_INCREMENTAL_BACKUPS=100
 INCREMENTAL_FROM_INCREMENTAL=1
@@ -82,9 +83,12 @@ function incremental_backup
     local increment_from_file=${7-}
     local backup_seq=${8-}
 
-    echo "Performing incremental backup on $snapshot from $increment_from"
+    local snapshot_size=$( /sbin/zfs send --raw --nvPDci $increment_from $snapshot | grep size | awk  '{print $2}' )
 
-    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+    echo "Performing incremental backup on $snapshot from $increment_from ($snapshot_size bytes)"
+
+    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+        --expected-size $snapshot_size \
         --metadata=FullSnapshot=false,\
 Snapshot=$snapshot,\
 LastFullSnapshot=$last_full_snapshot,\
@@ -101,10 +105,13 @@ function full_backup
     local backup_path=${2-}
     local filename=${3-}
 
-    echo "Performing full backup on $snapshot"
+    local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot | grep size | awk  '{print $2}' )
 
-    /sbin/zfs send --raw -Dcp $snapshot | pv | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
-         --metadata=FullSnapshot=true,\
+    echo "Performing full backup on $snapshot ($snapshot_size bytes)"
+
+    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+        --expected-size $snapshot_size \
+        --metadata=FullSnapshot=true,\
 Snapshot=$snapshot,\
 LastFullSnapshot=$snapshot,\
 LastFullSnapshotFile=$filename,\
