@@ -199,6 +199,7 @@ function incremental_backup
     local increment_from=${6-}
     local increment_from_file=${7-}
     local backup_seq=${8-}
+    local snapshot_time=${9-}
 
     local snapshot_size=$( /sbin/zfs send --raw -nvPDci $increment_from $snapshot | awk '/size/ {print $2}' )
 
@@ -212,6 +213,7 @@ LastFullSnapshot=$last_full_snapshot,\
 LastFullSnapshotFile=$last_full_snapshot_file,\
 IncrementFrom=$increment_from,\
 IncrementFromFile=$increment_from_file,\
+SnapshotCreation=$snapshot_time,\
 BackupSeq=$backup_seq,\
 Dedup=true,Lz4comp=true 
 }
@@ -221,6 +223,7 @@ function full_backup
     local snapshot=${1-}
     local backup_path=${2-}
     local filename=${3-}
+    local snapshot_time=${4-}
 
     local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot |  awk '/size/ {print $2}' )
 
@@ -234,6 +237,7 @@ LastFullSnapshot=$snapshot,\
 LastFullSnapshotFile=$filename,\
 IncrementFrom=$snapshot,\
 IncrementFromFile=$filename,\
+SnapshotCreation=$snapshot_time,\
 BackupSeq=0,\
 Dedup=true,Lz4comp=true
 }
@@ -259,6 +263,7 @@ function backup_dataset
 
     local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort  -r | head -1 | awk '{print $4}' )
     local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
+    local latest_snapshot_time=$( zfs list -Ht snap -o creation -p $latest_snapshot )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
 
     if [[ -z $latest_snapshot ]]
@@ -267,7 +272,7 @@ function backup_dataset
     elif [[ -z $latest_remote_file ]]
     then
         print_log info "No remote file for $dataset found" 
-        full_backup $latest_snapshot $backup_path $remote_filename
+        full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
     elif [[ $latest_remote_file == $remote_filename ]]
     then
         print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
@@ -294,13 +299,13 @@ function backup_dataset
         if [[ $backup_seq -gt $max_incremental_backups ]]
         then
             print_log notice "Max number of incrementals reached for $dataset"
-            full_backup $latest_snapshot $backup_path $remote_filename
+            full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
         elif [[ -z $( /sbin/zfs list -Ht snap -o name  | grep "^$increment_from$" ) ]]
         then
             print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
-            full_backup $latest_snapshot $backup_path $remote_filename
+            full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
         else
-            incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $increment_from_filename $backup_seq
+            incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $increment_from_filename $backup_seq $latest_snapshot_time
         fi
     fi 
 }
