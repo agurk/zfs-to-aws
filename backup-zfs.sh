@@ -11,7 +11,7 @@ DEFAULT_INCREMENTAL_FROM_INCREMENTAL=0
 DEFAULT_MAX_INCREMENTAL_BACKUPS=100
 DEFAULT_SNAPSHOT_TYPES="zfs-auto-snap_monthly"
 
-OPT_CONFIG_FILE='s3backup.conf'
+OPT_CONFIG_FILE='backup-zfs.conf'
 OPT_DEBUG=''
 OPT_PREFIX="zfs-backup"
 OPT_QUIET=''
@@ -263,7 +263,7 @@ function backup_dataset
 
     local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort  -r | head -1 | awk '{print $4}' )
     local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
-    local latest_snapshot_time=$( zfs list -Ht snap -o creation -p $latest_snapshot )
+    local latest_snapshot_time=$( /sbin/zfs list -Ht snap -o creation -p $latest_snapshot )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
 
     if [[ -z $latest_snapshot ]]
