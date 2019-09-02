@@ -3,6 +3,20 @@
 set -o nounset
 set -o pipefail
 
+readonly SCRIPT_VERSION=1.0
+
+readonly META_SNAPSHOT="snapshot"
+readonly META_FULL_SNAPSHOT="full-snapshot"
+readonly META_LAST_FULL="last-full-snapshot"
+readonly META_LAST_FULL_FILE="last-full-snapshot-file"
+readonly META_INCREMENT_FROM="increment-from"
+readonly META_INCREMENT_FROM_FILE="increment-from-file"
+readonly META_SNAPSHOT_CREATION="snapshot-creation"
+readonly META_BACKUP_SEQ="backup-sequence"
+readonly META_SCRIPT_VERSION="backup-script-version"
+readonly META_DEDUP="deduplification"
+readonly META_LZ4="compression-lz4"
+
 BUCKET=
 AWS_REGION=
 BACKUP_PATH=$(hostname -f)
@@ -207,15 +221,16 @@ function incremental_backup
 
     /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
-        --metadata=FullSnapshot=false,\
-Snapshot=$snapshot,\
-LastFullSnapshot=$last_full_snapshot,\
-LastFullSnapshotFile=$last_full_snapshot_file,\
-IncrementFrom=$increment_from,\
-IncrementFromFile=$increment_from_file,\
-SnapshotCreation=$snapshot_time,\
-BackupSeq=$backup_seq,\
-Dedup=true,Lz4comp=true 
+        --metadata=$META_FULL_SNAPSHOT=false,\
+$META_SNAPSHOT=$snapshot,\
+$META_LAST_FULL=$last_full_snapshot,\
+$META_LAST_FULL_FILE=$last_full_snapshot_file,\
+$META_INCREMENT_FROM=$increment_from,\
+$META_INCREMENT_FROM_FILE=$increment_from_file,\
+$META_SNAPSHOT_CREATION=$snapshot_time,\
+$META_BACKUP_SEQ=$backup_seq,\
+$META_SCRIPT_VERSION=$SCRIPT_VERSION,\
+$META_DEDUP=true,$META_LZ4=true 
 }
 
 function full_backup
@@ -231,15 +246,16 @@ function full_backup
 
     /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
-        --metadata=FullSnapshot=true,\
-Snapshot=$snapshot,\
-LastFullSnapshot=$snapshot,\
-LastFullSnapshotFile=$filename,\
-IncrementFrom=$snapshot,\
-IncrementFromFile=$filename,\
-SnapshotCreation=$snapshot_time,\
-BackupSeq=0,\
-Dedup=true,Lz4comp=true
+        --metadata=$META_FULL_SNAPSHOT=true,\
+$META_SNAPSHOT=$snapshot,\
+$META_LAST_FULL=$snapshot,\
+$META_LAST_FULL_FILE=$filename,\
+$META_INCREMENT_FROM=$snapshot,\
+$META_INCREMENT_FROM_FILE=$filename,\
+$META_SNAPSHOT_CREATION=$snapshot_time,\
+$META_BACKUP_SEQ=0,\
+$META_SCRIPT_VERSION=$SCRIPT_VERSION,\
+$META_DEDUP=true,$META_LZ4=true
 }
 
 function backup_dataset
@@ -278,10 +294,10 @@ function backup_dataset
         print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
     else
         local remote_meta=$( aws s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
-        local last_full=$(echo $remote_meta| jq -r ".Metadata.lastfullsnapshot")
-        local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.lastfullsnapshotfile")
-        local backup_seq=$(( $(echo $remote_meta | jq -r ".Metadata.backupseq" ) + 1 ))
-        local increment_from=$(echo $remote_meta | jq -r ".Metadata.snapshot")
+        local last_full=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL\"")
+        local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL_FILE\"")
+        local backup_seq=$(( $(echo $remote_meta | jq -r ".Metadata.\"$META_BACKUP_SEQ\"" ) + 1 ))
+        local increment_from=$(echo $remote_meta | jq -r ".Metadata.\"$META_SNAPSHOT\"")
         local increment_from_filename=$latest_remote_file
 
         if [[ $incremental_from_incremental -ne 1 ]]
