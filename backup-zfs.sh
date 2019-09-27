@@ -216,8 +216,9 @@ function incremental_backup
     local snapshot_time=${9-}
 
     local snapshot_size=$( /sbin/zfs send --raw -nvPDci $increment_from $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
 
-    print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size bytes)"
+    print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size_iec)"
 
     /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
@@ -241,8 +242,9 @@ function full_backup
     local snapshot_time=${4-}
 
     local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot |  awk '/size/ {print $2}' )
+    local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
 
-    print_log notice "Performing full backup of $snapshot ($snapshot_size bytes)"
+    print_log notice "Performing full backup of $snapshot ($snapshot_size_iec)"
 
     /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
         --expected-size $snapshot_size \
