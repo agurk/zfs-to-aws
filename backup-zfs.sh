@@ -20,6 +20,7 @@ readonly META_LZ4="compression-lz4"
 BUCKET=
 AWS_REGION=
 BACKUP_PATH=$(hostname -f)
+PARTIAL_NAME=partial_upload_$(date +%s)
 
 DEFAULT_INCREMENTAL_FROM_INCREMENTAL=0
 DEFAULT_MAX_INCREMENTAL_BACKUPS=100
@@ -51,6 +52,17 @@ function check_set
         print_log critical $1
         exit 1
     fi  
+}
+
+function check_dep
+{
+    dep=$1
+    which $1 > /dev/null
+    if [[ $? -gt 0 ]]
+    then
+        print_log critical "required dependency $1 not available"
+        exit 1 
+    fi
 }
 
 function print_log # level, message, ...
@@ -220,7 +232,7 @@ function incremental_backup
 
     print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$PARTIAL_NAME\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=false,\
 $META_SNAPSHOT=$snapshot,\
@@ -232,6 +244,9 @@ $META_SNAPSHOT_CREATION=$snapshot_time,\
 $META_BACKUP_SEQ=$backup_seq,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
 $META_DEDUP=true,$META_LZ4=true 
+
+    print_log debug "Backup $PARTIAL_NAME uploaded, renaming to $filename"
+    aws s3 mv s3://$BUCKET/$backup_path/$PARTIAL_NAME s3://$BUCKET/$backup_path/$filename
 }
 
 function full_backup
@@ -246,7 +261,7 @@ function full_backup
 
     print_log notice "Performing full backup of $snapshot ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename \
+    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$PARTIAL_NAME\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=true,\
 $META_SNAPSHOT=$snapshot,\
@@ -258,6 +273,9 @@ $META_SNAPSHOT_CREATION=$snapshot_time,\
 $META_BACKUP_SEQ=0,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
 $META_DEDUP=true,$META_LZ4=true
+
+    print_log debug "Backup $PARTIAL_NAME uploaded, renaming to $filename"
+    aws s3 mv s3://$BUCKET/$backup_path/$PARTIAL_NAME s3://$BUCKET/$backup_path/$filename
 }
 
 function backup_dataset
@@ -327,6 +345,10 @@ function backup_dataset
         fi
     fi 
 }
+
+check_dep aws
+check_dep jq
+check_dep pv
 
 GETOPT=$(getopt \
   --longoptions=config:,debug,help,quiet,syslog,verbose \
