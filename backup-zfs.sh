@@ -3,7 +3,7 @@
 set -o nounset
 set -o pipefail
 
-readonly SCRIPT_VERSION=1.0
+readonly SCRIPT_VERSION=1.1
 
 readonly META_SNAPSHOT="snapshot"
 readonly META_FULL_SNAPSHOT="full-snapshot"
@@ -16,11 +16,13 @@ readonly META_BACKUP_SEQ="backup-sequence"
 readonly META_SCRIPT_VERSION="backup-script-version"
 readonly META_DEDUP="deduplification"
 readonly META_LZ4="compression-lz4"
+readonly META_COMPLETE_TAG='{"TagSet":[{"Key":"upload_state","Value":"complete"}]}'
+readonly META_COMPLETE_KEY="upload_state"
+readonly META_COMPLETE_VALUE="complete"
 
 BUCKET=
 AWS_REGION=
 BACKUP_PATH=$(hostname -f)
-PARTIAL_NAME=partial_upload_$(date +%s)
 
 DEFAULT_INCREMENTAL_FROM_INCREMENTAL=0
 DEFAULT_MAX_INCREMENTAL_BACKUPS=100
@@ -193,7 +195,7 @@ function check_aws_bucket
     elif [[ $bucket_ls =~ 'An error occurred (NoSuchBucket)' ]]
     then
         print_log notice "Creating bucket $BUCKET in region $AWS_REGION"
-        aws s3api create-bucket  --bucket $BUCKET --region $AWS_REGION --create-bucket-configuration LocationConstraint=$AWS_REGION --acl private
+        aws s3api create-bucket --bucket $BUCKET --region $AWS_REGION --create-bucket-configuration LocationConstraint=$AWS_REGION --acl private
         aws s3api put-bucket-encryption --bucket $BUCKET --server-side-encryption-configuration '{"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}'
     else
         print_log info "Bucket \"$BUCKET\" exists and we have access to it"
@@ -232,7 +234,7 @@ function incremental_backup
 
     print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$PARTIAL_NAME\
+    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=false,\
 $META_SNAPSHOT=$snapshot,\
@@ -245,8 +247,13 @@ $META_BACKUP_SEQ=$backup_seq,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
 $META_DEDUP=true,$META_LZ4=true 
 
-    print_log debug "Backup $PARTIAL_NAME uploaded, renaming to $filename"
-    aws s3 mv s3://$BUCKET/$backup_path/$PARTIAL_NAME s3://$BUCKET/$backup_path/$filename
+    if [[ $? == 0 ]]
+    then
+        print_log debug "Backup $filename uploaded, setting as complete"
+        aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
+    else
+        print_log critical "Error uploading $filename"
+    fi
 }
 
 function full_backup
@@ -256,12 +263,12 @@ function full_backup
     local filename=${3-}
     local snapshot_time=${4-}
 
-    local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot |  awk '/size/ {print $2}' )
+    local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot | awk '/size/ {print $2}' )
     local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
 
     print_log notice "Performing full backup of $snapshot ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$PARTIAL_NAME\
+    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=true,\
 $META_SNAPSHOT=$snapshot,\
@@ -274,8 +281,13 @@ $META_BACKUP_SEQ=0,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
 $META_DEDUP=true,$META_LZ4=true
 
-    print_log debug "Backup $PARTIAL_NAME uploaded, renaming to $filename"
-    aws s3 mv s3://$BUCKET/$backup_path/$PARTIAL_NAME s3://$BUCKET/$backup_path/$filename
+    if [[ $? == 0 ]]
+    then
+        print_log debug "Backup $filename uploaded, setting as complete"
+        aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
+    else
+        print_log critical "Error uploading $filename"
+    fi
 }
 
 function backup_dataset
@@ -297,7 +309,7 @@ function backup_dataset
     local backup_path="$BACKUP_PATH/$dataset" 
     check_aws_folder $backup_path
 
-    local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort  -r | head -1 | awk '{print $4}' )
+    local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
     local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
     local latest_snapshot_time=$( /sbin/zfs list -Ht snap -o creation -p $latest_snapshot )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
@@ -319,13 +331,22 @@ function backup_dataset
         local backup_seq=$(( $(echo $remote_meta | jq -r ".Metadata.\"$META_BACKUP_SEQ\"" ) + 1 ))
         local increment_from=$(echo $remote_meta | jq -r ".Metadata.\"$META_SNAPSHOT\"")
         local increment_from_filename=$latest_remote_file
+        local completed_upload=$(aws s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
+
+        # Fail the backup if there's an invalid file already uploaded as we don't know what
+        # would be a better course of action at this stage (choose older? full backup?)
+        if [[ $completed_upload != $META_COMPLETE_VALUE ]]
+        then
+            print_log critical "Previous upload $filename either failed or still in progress"
+            exit 1
+        fi
 
         if [[ $incremental_from_incremental -ne 1 ]]
         then
             print_log info "Incremental incrementals turned off"
             increment_from=$last_full
             increment_from_filename=$last_full_filename
-        elif [[ -z $( /sbin/zfs list -Ht snap -o name  | grep "^$increment_from$" )  ]]
+        elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
         then
             print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot"
             increment_from=$last_full
@@ -336,7 +357,7 @@ function backup_dataset
         then
             print_log notice "Max number of incrementals reached for $dataset"
             full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
-        elif [[ -z $( /sbin/zfs list -Ht snap -o name  | grep "^$increment_from$" ) ]]
+        elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
         then
             print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
             full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
