@@ -336,7 +336,7 @@ function backup_dataset
 
         if [[ $script_version != "$SCRIPT_VERSION" ]]
         then
-            print_log critical "Previous upload $filename from version $script_version (current version: $SCRIPT_VERSION)"
+            print_log critical "Previous upload $last_full from version $script_version (current version: $SCRIPT_VERSION)"
             exit 1
         fi
 
@@ -344,7 +344,7 @@ function backup_dataset
         # would be a better course of action at this stage (choose older? full backup?)
         if [[ $completed_upload != $META_COMPLETE_VALUE ]]
         then
-            print_log critical "Previous upload $filename either failed or still in progress"
+            print_log critical "Previous upload $last_full either failed or still in progress"
             exit 1
         fi
 
