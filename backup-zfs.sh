@@ -330,8 +330,15 @@ function backup_dataset
         local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL_FILE\"")
         local backup_seq=$(( $(echo $remote_meta | jq -r ".Metadata.\"$META_BACKUP_SEQ\"" ) + 1 ))
         local increment_from=$(echo $remote_meta | jq -r ".Metadata.\"$META_SNAPSHOT\"")
+        local script_version=$(echo $remote_meta | jq -r ".Metadata.\"$META_SCRIPT_VERSION\"")
         local increment_from_filename=$latest_remote_file
         local completed_upload=$(aws s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
+
+        if [[ $script_version != "$SCRIPT_VERSION" ]]
+        then
+            print_log critical "Previous upload $filename from version $script_version (current version: $SCRIPT_VERSION)"
+            exit 1
+        fi
 
         # Fail the backup if there's an invalid file already uploaded as we don't know what
         # would be a better course of action at this stage (choose older? full backup?)
