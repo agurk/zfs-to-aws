@@ -34,17 +34,21 @@ OPT_PREFIX="zfs-backup"
 OPT_QUIET=''
 OPT_SYSLOG=''
 OPT_VERBOSE=''
+OPT_FORCE=0
+
+EXIT_STATUS=0
 
 function print_usage
 {
-    echo "Usage: $0 [options] 
+    echo "Usage: $0 [options]
+  -f, --force        Force upload ignoring version/completeness checks
   -d, --debug        Print debugging messages
   -c, --config=FILE  Get config from FILE
   -h, --help         Print this usage message
   -q, --quiet        Suppress warnings and notices at the console
   -g, --syslog       Write messages into the system log
   -v, --verbose      Print info messages
-" 
+"
 }
 
 function check_set
@@ -53,7 +57,7 @@ function check_set
     then
         print_log critical $1
         exit 1
-    fi  
+    fi
 }
 
 function check_dep
@@ -63,7 +67,7 @@ function check_dep
     if [[ $? -gt 0 ]]
     then
         print_log critical "required dependency $1 not available"
-        exit 1 
+        exit 1
     fi
 }
 
@@ -245,7 +249,7 @@ $META_INCREMENT_FROM_FILE=$increment_from_file,\
 $META_SNAPSHOT_CREATION=$snapshot_time,\
 $META_BACKUP_SEQ=$backup_seq,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
-$META_DEDUP=true,$META_LZ4=true 
+$META_DEDUP=true,$META_LZ4=true
 
     if [[ $? == 0 ]]
     then
@@ -306,7 +310,7 @@ function backup_dataset
     print_log info ""
     print_log info "Running backup for dataset: $dataset, ss_types: $snapshot_types, max_increment: $max_incremental_backups, inc_from_inc: $incremental_from_incremental"
 
-    local backup_path="$BACKUP_PATH/$dataset" 
+    local backup_path="$BACKUP_PATH/$dataset"
     check_aws_folder $backup_path
 
     local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
@@ -317,9 +321,10 @@ function backup_dataset
     if [[ -z $latest_snapshot ]]
     then
         print_log error "No snapshots found for $dataset"
+        EXIT_STATUS=1
     elif [[ -z $latest_remote_file ]]
     then
-        print_log info "No remote file for $dataset found" 
+        print_log info "No remote file for $dataset found"
         full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
     elif [[ $latest_remote_file == $remote_filename ]]
     then
@@ -334,44 +339,42 @@ function backup_dataset
         local increment_from_filename=$latest_remote_file
         local completed_upload=$(aws s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
 
-        if [[ $script_version != "$SCRIPT_VERSION" ]]
+        if [[ $OPT_FORCE -eq 0 && $script_version != "$SCRIPT_VERSION" ]]
         then
-            print_log critical "Previous upload $last_full from version $script_version (current version: $SCRIPT_VERSION)"
-            exit 1
-        fi
-
-        # Fail the backup if there's an invalid file already uploaded as we don't know what
-        # would be a better course of action at this stage (choose older? full backup?)
-        if [[ $completed_upload != $META_COMPLETE_VALUE ]]
+            print_log critical "Previous upload $latest_remote_file from version $script_version (current version: $SCRIPT_VERSION)"
+            EXIT_STATUS=1
+        elif [[ $OPT_FORCE -eq 0 && $completed_upload != $META_COMPLETE_VALUE ]]
         then
-            print_log critical "Previous upload $last_full either failed or still in progress"
-            exit 1
-        fi
-
-        if [[ $incremental_from_incremental -ne 1 ]]
-        then
-            print_log info "Incremental incrementals turned off"
-            increment_from=$last_full
-            increment_from_filename=$last_full_filename
-        elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
-        then
-            print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot"
-            increment_from=$last_full
-            increment_from_filename=$last_full_filename
-        fi
-
-        if [[ $backup_seq -gt $max_incremental_backups ]]
-        then
-            print_log notice "Max number of incrementals reached for $dataset"
-            full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
-        elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
-        then
-            print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
-            full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
+            # Fail the backup if there's an invalid file already uploaded as we don't know what
+            # would be a better course of action at this stage (choose older? full backup?)
+            print_log critical "Previous upload $latest_remote_file either failed or still in progress"
+            EXIT_STATUS=1
         else
-            incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $increment_from_filename $backup_seq $latest_snapshot_time
+            if [[ $incremental_from_incremental -ne 1 ]]
+            then
+                print_log info "Incremental incrementals turned off"
+                increment_from=$last_full
+                increment_from_filename=$last_full_filename
+            elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
+            then
+                print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot"
+                increment_from=$last_full
+                increment_from_filename=$last_full_filename
+            fi
+
+            if [[ $backup_seq -gt $max_incremental_backups ]]
+            then
+                print_log notice "Max number of incrementals reached for $dataset"
+                full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
+            elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
+            then
+                print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
+                full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
+            else
+                incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $increment_from_filename $backup_seq $latest_snapshot_time
+            fi
         fi
-    fi 
+    fi
 }
 
 check_dep aws
@@ -379,8 +382,8 @@ check_dep jq
 check_dep pv
 
 GETOPT=$(getopt \
-  --longoptions=config:,debug,help,quiet,syslog,verbose \
-  --options=c:dhqsv \
+  --longoptions=force,config:,debug,help,quiet,syslog,verbose \
+  --options=fc:dhqsv \
   -- "$@" ) \
   || exit 128
 
@@ -389,6 +392,10 @@ eval set -- "$GETOPT"
 while [ "$#" -gt '0' ]
 do
     case "$1" in
+        (-f|--force)
+            OPT_FORCE=1
+            shift 1
+            ;;
         (-c|--config)
             OPT_CONFIG_FILE=$2
             shift 2
@@ -426,4 +433,6 @@ do
 done
 
 load_config
+
+exit $EXIT_STATUS
 
