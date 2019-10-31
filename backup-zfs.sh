@@ -41,12 +41,12 @@ EXIT_STATUS=0
 function print_usage
 {
     echo "Usage: $0 [options]
-  -f, --force        Force upload ignoring version/completeness checks
+  -c, --config FILE  Get config from FILE
   -d, --debug        Print debugging messages
-  -c, --config=FILE  Get config from FILE
+  -f, --force        Force upload ignoring version/completeness checks
   -h, --help         Print this usage message
   -q, --quiet        Suppress warnings and notices at the console
-  -g, --syslog       Write messages into the system log
+  -s, --syslog       Write messages into the system log
   -v, --verbose      Print info messages
 "
 }
