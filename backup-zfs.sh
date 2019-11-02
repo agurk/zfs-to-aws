@@ -195,7 +195,7 @@ function check_aws_bucket
     if [[ $bucket_ls =~ 'An error occurred (AccessDenied)' ]]
     then
         print_log error "Access denied attempting to access bucket $BUCKET"
-        exit
+        exit 1
     elif [[ $bucket_ls =~ 'An error occurred (NoSuchBucket)' ]]
     then
         print_log notice "Creating bucket $BUCKET in region $AWS_REGION"
@@ -213,7 +213,7 @@ function check_aws_folder
     if [[ $dir_list =~ 'An error occurred (AccessDenied)' ]]
     then
         print_log error "Access denied attempting to access $backup_path"
-        exit
+        exit 1
     elif [[ $dir_list == '' ]]
     then
         print_log notice "Creating remote folder $backup_path"
