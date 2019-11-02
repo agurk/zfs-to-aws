@@ -257,6 +257,7 @@ $META_DEDUP=true,$META_LZ4=true
         aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
     else
         print_log critical "Error uploading $filename"
+        EXIT_STATUS=1
     fi
 }
 
@@ -291,6 +292,7 @@ $META_DEDUP=true,$META_LZ4=true
         aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
     else
         print_log critical "Error uploading $filename"
+        EXIT_STATUS=1
     fi
 }
 
