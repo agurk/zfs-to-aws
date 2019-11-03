@@ -153,6 +153,7 @@ function load_config
             if [[ $in_ds == 0 ]]
             then
                 check_aws_bucket
+                check_partial_uploads
             elif [[ $in_ds == 1 && $ds_name ]]
             then
                 print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
@@ -218,6 +219,15 @@ function check_aws_folder
     then
         print_log notice "Creating remote folder $backup_path"
         aws s3api put-object --bucket $BUCKET --key $backup_path/
+    fi
+}
+
+function check_partial_uploads
+{
+    local current_mp_uploads=$( aws s3api list-multipart-uploads --bucket $BUCKET )
+    if [[ $current_mp_uploads != '' ]]
+    then
+        print_log warning "Incomplete multi-part uploads exists for $BUCKET"
     fi
 }
 

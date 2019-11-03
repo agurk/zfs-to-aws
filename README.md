@@ -13,6 +13,7 @@ Requirements:
 Recommendations:
 - specific aws user
 - retention policy to move datasets to glacier
+- lifecycle policy to automatically clear incomplete partial uploads
 
 ToDo:
 - Delete old backups automatically
