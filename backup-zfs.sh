@@ -243,12 +243,12 @@ function incremental_backup
     local backup_seq=${8-}
     local snapshot_time=${9-}
 
-    local snapshot_size=$( /sbin/zfs send --raw -nvPDci $increment_from $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size=$( /sbin/zfs send --raw -nvPci $increment_from $snapshot | awk '/size/ {print $2}' )
     local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
 
     print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
+    /sbin/zfs send --raw -cpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=false,\
 $META_SNAPSHOT=$snapshot,\
@@ -259,7 +259,7 @@ $META_INCREMENT_FROM_FILE=$increment_from_file,\
 $META_SNAPSHOT_CREATION=$snapshot_time,\
 $META_BACKUP_SEQ=$backup_seq,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
-$META_DEDUP=true,$META_LZ4=true
+$META_DEDUP=false,$META_LZ4=true
 
     if [[ $? == 0 ]]
     then
@@ -278,12 +278,12 @@ function full_backup
     local filename=${3-}
     local snapshot_time=${4-}
 
-    local snapshot_size=$( /sbin/zfs send --raw -nvPDc $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size=$( /sbin/zfs send --raw -nvPc $snapshot | awk '/size/ {print $2}' )
     local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
 
     print_log notice "Performing full backup of $snapshot ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -Dcp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
+    /sbin/zfs send --raw -cp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=true,\
 $META_SNAPSHOT=$snapshot,\
@@ -294,7 +294,7 @@ $META_INCREMENT_FROM_FILE=$filename,\
 $META_SNAPSHOT_CREATION=$snapshot_time,\
 $META_BACKUP_SEQ=0,\
 $META_SCRIPT_VERSION=$SCRIPT_VERSION,\
-$META_DEDUP=true,$META_LZ4=true
+$META_DEDUP=false,$META_LZ4=true
 
     if [[ $? == 0 ]]
     then
@@ -326,6 +326,7 @@ function backup_dataset
     check_aws_folder $backup_path
 
     local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
+    # todo: check if completed correctly
     local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
     local latest_snapshot_time=$( /sbin/zfs list -Ht snap -o creation -p $latest_snapshot )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
@@ -338,10 +339,11 @@ function backup_dataset
     then
         print_log info "No remote file for $dataset found"
         full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
-    elif [[ $latest_remote_file == $remote_filename ]]
-    then
-        print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
+    #elif [[ $latest_remote_file == $remote_filename ]]
+    #then
+    #    print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
     else
+        # todo: check if completed correctly
         local remote_meta=$( aws s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
         local last_full=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL\"")
         local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL_FILE\"")
@@ -351,15 +353,18 @@ function backup_dataset
         local increment_from_filename=$latest_remote_file
         local completed_upload=$(aws s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
 
-        if [[ $OPT_FORCE -eq 0 && $script_version != "$SCRIPT_VERSION" ]]
-        then
-            print_log critical "Previous upload $latest_remote_file from version $script_version (current version: $SCRIPT_VERSION)"
-            EXIT_STATUS=1
-        elif [[ $OPT_FORCE -eq 0 && $completed_upload != $META_COMPLETE_VALUE ]]
+        if [[ $OPT_FORCE -eq 0 && $completed_upload != $META_COMPLETE_VALUE ]]
         then
             # Fail the backup if there's an invalid file already uploaded as we don't know what
             # would be a better course of action at this stage (choose older? full backup?)
-            print_log critical "Previous upload $latest_remote_file either failed or still in progress"
+            print_log critical "Latest server upload $latest_remote_file either failed or still in progress"
+            EXIT_STATUS=1
+        elif [[ $latest_remote_file == $remote_filename ]]
+        then
+            print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
+        elif [[ $OPT_FORCE -eq 0 && $script_version != "$SCRIPT_VERSION" ]]
+        then
+            print_log critical "Previous upload $latest_remote_file from version $script_version (current version: $SCRIPT_VERSION)"
             EXIT_STATUS=1
         else
             if [[ $incremental_from_incremental -ne 1 ]]
