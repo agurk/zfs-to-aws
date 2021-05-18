@@ -416,7 +416,11 @@ check_dep pv
 getopt -T > /dev/null
 if [ $? -eq 4 ]; then
 	# GNU enhanced getopt is available
-	GETOPT=$(getopt --longoptions=force,config:,debug,help,quiet,syslog,verbose --options=fc:dhqsv -- "$@" ) || exit 128
+	GETOPT=$(getopt \
+		--longoptions=force,config:,debug,help,quiet,syslog,verbose \
+		--options=fc:dhqsv -- \
+		"$@" ) \
+		|| exit 128
 else
 	# Original getopt is available (no long option names, no whitespace, no sorting)
 	GETOPT=$(getopt fc:dhqsv "$@") || exit 128
