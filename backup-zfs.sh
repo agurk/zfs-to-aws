@@ -147,6 +147,9 @@ function load_config
         elif [[ $in_ds == 0 && $arg == 'region' ]]
         then
             AWS_REGION=$val
+        elif [[ $in_ds == 0 && $arg == 'endpoint_url' ]]
+        then
+            ENDPOINT_URL=$val
         elif [[ $in_ds == 0 && $arg == 'backup_path' ]]
         then
             BACKUP_PATH=$val
