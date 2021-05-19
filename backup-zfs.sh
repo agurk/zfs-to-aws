@@ -261,6 +261,13 @@ function incremental_backup
     local backup_seq=${8-}
     local snapshot_time=${9-}
 
+    #return if the dataset deos not contain any snapshots
+    local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
+    if [[ $snapshot_check =~ 'no datasets available' ]] 
+    then
+	    return false
+    fi
+
     local snapshot_size=$( ${ZFS} send --raw -nvPci $increment_from $snapshot | awk '/size/ {print $2}' )
     local snapshot_size_iec=$(bytesToHumanReadable $snapshot_size)
 
@@ -295,6 +302,13 @@ function full_backup
     local backup_path=${2-}
     local filename=${3-}
     local snapshot_time=${4-}
+
+    #return if the dataset deos not contain any snapshots
+    local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
+    if [[ $snapshot_check =~ 'no datasets available' ]] 
+    then
+	    return false
+    fi
 
     local snapshot_size=$( ${ZFS} send --raw -nvPc $snapshot | awk '/size/ {print $2}' )
     local snapshot_size_iec=$(bytesToHumanReadable $snapshot_size)
