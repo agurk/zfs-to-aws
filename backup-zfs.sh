@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -o nounset
 set -o pipefail
@@ -22,6 +22,8 @@ readonly META_COMPLETE_VALUE="complete"
 
 BUCKET=
 AWS_REGION=
+ENDPOINT_URL=
+PREFIX_ENDPOINT=
 BACKUP_PATH=$(hostname -f)
 
 DEFAULT_INCREMENTAL_FROM_INCREMENTAL=0
@@ -38,6 +40,9 @@ OPT_FORCE=0
 
 EXIT_STATUS=0
 
+ZFS=$(which zfs)
+AWS=$(which aws)
+
 function print_usage
 {
     echo "Usage: $0 [options]
@@ -51,6 +56,15 @@ function print_usage
 "
 }
 
+function check_set_ENDPOINT_URL
+{
+    if [[ -n $1 ]]
+    then
+	ENDPOINT_URL=$1
+	PREFIX_ENDPOINT=--endpoint-url
+    fi
+
+}
 function check_set
 {
     if [[ -z $2 ]]
@@ -144,11 +158,15 @@ function load_config
         elif [[ $in_ds == 0 && $arg == 'region' ]]
         then
             AWS_REGION=$val
+        elif [[ $in_ds == 0 && $arg == 'endpoint_url' ]]
+        then
+            ENDPOINT_URL=$val
         elif [[ $in_ds == 0 && $arg == 'backup_path' ]]
         then
             BACKUP_PATH=$val
         elif [[ $arg == '[dataset]' ]]
         then
+	    check_set_ENDPOINT_URL "$ENDPOINT_URL"
             # Checking bucket here as this is the opportunity when the non-dataset config has finally been loaded
             if [[ $in_ds == 0 ]]
             then
@@ -192,7 +210,7 @@ function check_aws_bucket
 {
     print_log debug "Starting check that AWS bucket exists"
     check_set "AWS bucket name not set" $BUCKET
-    local bucket_ls=$( aws s3 ls $BUCKET 2>&1 )
+    local bucket_ls=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 ls $BUCKET 2>&1 )
     if [[ $bucket_ls =~ 'An error occurred (AccessDenied)' ]]
     then
         print_log error "Access denied attempting to access bucket $BUCKET"
@@ -200,8 +218,8 @@ function check_aws_bucket
     elif [[ $bucket_ls =~ 'An error occurred (NoSuchBucket)' ]]
     then
         print_log notice "Creating bucket $BUCKET in region $AWS_REGION"
-        aws s3api create-bucket --bucket $BUCKET --region $AWS_REGION --create-bucket-configuration LocationConstraint=$AWS_REGION --acl private
-        aws s3api put-bucket-encryption --bucket $BUCKET --server-side-encryption-configuration '{"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}'
+        $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api create-bucket --bucket $BUCKET --region $AWS_REGION --create-bucket-configuration LocationConstraint=$AWS_REGION --acl private
+        $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api put-bucket-encryption --bucket $BUCKET --server-side-encryption-configuration '{"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}'
     else
         print_log info "Bucket \"$BUCKET\" exists and we have access to it"
     fi
@@ -210,7 +228,7 @@ function check_aws_bucket
 function check_aws_folder
 {
     local backup_path=${1-NO_DATASET}
-    local dir_list=$(aws s3 ls $BUCKET/$backup_path 2>&1)
+    local dir_list=$($AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 ls $BUCKET/$backup_path 2>&1)
     if [[ $dir_list =~ 'An error occurred (AccessDenied)' ]]
     then
         print_log error "Access denied attempting to access $backup_path"
@@ -218,13 +236,13 @@ function check_aws_folder
     elif [[ $dir_list == '' ]]
     then
         print_log notice "Creating remote folder $backup_path"
-        aws s3api put-object --bucket $BUCKET --key $backup_path/
+        $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api put-object --bucket $BUCKET --key $backup_path/
     fi
 }
 
 function check_partial_uploads
 {
-    local current_mp_uploads=$( aws s3api list-multipart-uploads --bucket $BUCKET )
+    local current_mp_uploads=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api list-multipart-uploads --bucket $BUCKET )
     if [[ $current_mp_uploads != '' ]]
     then
         print_log warning "Incomplete multi-part uploads exists for $BUCKET"
@@ -243,12 +261,19 @@ function incremental_backup
     local backup_seq=${8-}
     local snapshot_time=${9-}
 
-    local snapshot_size=$( /sbin/zfs send --raw -nvPci $increment_from $snapshot | awk '/size/ {print $2}' )
-    local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
+    #return if the dataset deos not contain any snapshots
+    local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
+    if [[ $snapshot_check =~ 'no datasets available' ]] 
+    then
+	    return false
+    fi
+
+    local snapshot_size=$( ${ZFS} send --raw -nvPci $increment_from $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size_iec=$(bytesToHumanReadable $snapshot_size)
 
     print_log notice "Performing incremental backup of $snapshot from $increment_from ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -cpi $increment_from $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
+    ${ZFS} send --raw -cpi $increment_from $snapshot | pv -s $snapshot_size | $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=false,\
 $META_SNAPSHOT=$snapshot,\
@@ -264,7 +289,7 @@ $META_DEDUP=false,$META_LZ4=true
     if [[ $? == 0 ]]
     then
         print_log debug "Backup $filename uploaded, setting as complete"
-        aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
+        $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
     else
         print_log critical "Error uploading $filename"
         EXIT_STATUS=1
@@ -278,12 +303,19 @@ function full_backup
     local filename=${3-}
     local snapshot_time=${4-}
 
-    local snapshot_size=$( /sbin/zfs send --raw -nvPc $snapshot | awk '/size/ {print $2}' )
-    local snapshot_size_iec=$( numfmt --to iec --suffix=B $snapshot_size )
+    #return if the dataset deos not contain any snapshots
+    local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
+    if [[ $snapshot_check =~ 'no datasets available' ]] 
+    then
+	    return false
+    fi
+
+    local snapshot_size=$( ${ZFS} send --raw -nvPc $snapshot | awk '/size/ {print $2}' )
+    local snapshot_size_iec=$(bytesToHumanReadable $snapshot_size)
 
     print_log notice "Performing full backup of $snapshot ($snapshot_size_iec)"
 
-    /sbin/zfs send --raw -cp $snapshot | pv -s $snapshot_size | aws s3 cp - s3://$BUCKET/$backup_path/$filename\
+    ${ZFS} send --raw -cp $snapshot | pv -s $snapshot_size | $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 cp - s3://$BUCKET/$backup_path/$filename\
         --expected-size $snapshot_size \
         --metadata=$META_FULL_SNAPSHOT=true,\
 $META_SNAPSHOT=$snapshot,\
@@ -299,7 +331,7 @@ $META_DEDUP=false,$META_LZ4=true
     if [[ $? == 0 ]]
     then
         print_log debug "Backup $filename uploaded, setting as complete"
-        aws s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
+        $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api put-object-tagging --bucket $BUCKET --key $backup_path/$filename --tagging "$META_COMPLETE_TAG"
     else
         print_log critical "Error uploading $filename"
         EXIT_STATUS=1
@@ -309,7 +341,7 @@ $META_DEDUP=false,$META_LZ4=true
 function backup_dataset
 {
     local dataset=${1-}
-    if [[ -z $( /sbin/zfs list -Ho name | grep "^$dataset$" ) ]]
+    if [[ -z $( ${ZFS} list -Ho name | grep "^$dataset$" ) ]]
     then
         print_log error "Requested dataset $dataset from $OPT_CONFIG_FILE does not exist"
         return
@@ -325,10 +357,10 @@ function backup_dataset
     local backup_path="$BACKUP_PATH/$dataset"
     check_aws_folder $backup_path
 
-    local latest_remote_file=$( aws s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
+    local latest_remote_file=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
     # todo: check if completed correctly
-    local latest_snapshot=$( /sbin/zfs list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
-    local latest_snapshot_time=$( /sbin/zfs list -Ht snap -o creation -p $latest_snapshot )
+    local latest_snapshot=$( ${ZFS} list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
+    local latest_snapshot_time=$( ${ZFS} list -Ht snap -o creation -p $latest_snapshot )
     local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
 
     if [[ -z $latest_snapshot ]]
@@ -344,14 +376,14 @@ function backup_dataset
     #    print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
     else
         # todo: check if completed correctly
-        local remote_meta=$( aws s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
+        local remote_meta=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
         local last_full=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL\"")
         local last_full_filename=$(echo $remote_meta| jq -r ".Metadata.\"$META_LAST_FULL_FILE\"")
         local backup_seq=$(( $(echo $remote_meta | jq -r ".Metadata.\"$META_BACKUP_SEQ\"" ) + 1 ))
         local increment_from=$(echo $remote_meta | jq -r ".Metadata.\"$META_SNAPSHOT\"")
         local script_version=$(echo $remote_meta | jq -r ".Metadata.\"$META_SCRIPT_VERSION\"")
         local increment_from_filename=$latest_remote_file
-        local completed_upload=$(aws s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
+        local completed_upload=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
 
         if [[ $OPT_FORCE -eq 0 && $completed_upload != $META_COMPLETE_VALUE ]]
         then
@@ -372,7 +404,7 @@ function backup_dataset
                 print_log info "Incremental incrementals turned off"
                 increment_from=$last_full
                 increment_from_filename=$last_full_filename
-            elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
+            elif [[ -z $( ${ZFS} list -Ht snap -o name | grep "^$increment_from$" ) ]]
             then
                 print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot"
                 increment_from=$last_full
@@ -383,7 +415,7 @@ function backup_dataset
             then
                 print_log notice "Max number of incrementals reached for $dataset"
                 full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
-            elif [[ -z $( /sbin/zfs list -Ht snap -o name | grep "^$increment_from$" ) ]]
+            elif [[ -z $( ${ZFS} list -Ht snap -o name | grep "^$increment_from$" ) ]]
             then
                 print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
                 full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
@@ -394,15 +426,34 @@ function backup_dataset
     fi
 }
 
+# Converts bytes value to human-readable string [$1: bytes value]
+function bytesToHumanReadable
+{
+	local i=${1:-0} d="" s=0 S=("Bytes" "KiB" "MiB" "GiB" "TiB" "PiB" "EiB" "YiB" "ZiB")
+	while ((i > 1024 && s < ${#S[@]}-1)); do
+		printf -v d ".%02d" $((i % 1024 * 100 / 1024))
+		i=$((i / 1024))
+		s=$((s + 1))
+	done
+	echo "$i$d ${S[$s]}"
+}
+
 check_dep aws
 check_dep jq
 check_dep pv
 
-GETOPT=$(getopt \
-  --longoptions=force,config:,debug,help,quiet,syslog,verbose \
-  --options=fc:dhqsv \
-  -- "$@" ) \
-  || exit 128
+getopt -T > /dev/null
+if [ $? -eq 4 ]; then
+	# GNU enhanced getopt is available
+	GETOPT=$(getopt \
+		--longoptions=force,config:,debug,help,quiet,syslog,verbose \
+		--options=fc:dhqsv -- \
+		"$@" ) \
+		|| exit 128
+else
+	# Original getopt is available (no long option names, no whitespace, no sorting)
+	GETOPT=$(getopt fc:dhqsv "$@") || exit 128
+fi
 
 eval set -- "$GETOPT"
 
