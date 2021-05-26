@@ -60,14 +60,14 @@ function check_set_ENDPOINT_URL
 {
     if [[ -n $1 ]]
     then
-	ENDPOINT_URL=$1
-	PREFIX_ENDPOINT=--endpoint-url
+    ENDPOINT_URL=$1
+    PREFIX_ENDPOINT=--endpoint-url
     fi
 
 }
 function check_set
 {
-    if [[ -z $2 ]]
+    if [[ -z ${2:-} ]]
     then
         print_log critical $1
         exit 1
@@ -166,7 +166,7 @@ function load_config
             BACKUP_PATH=$val
         elif [[ $arg == '[dataset]' ]]
         then
-	    check_set_ENDPOINT_URL "$ENDPOINT_URL"
+        check_set_ENDPOINT_URL "$ENDPOINT_URL"
             # Checking bucket here as this is the opportunity when the non-dataset config has finally been loaded
             if [[ $in_ds == 0 ]]
             then
@@ -265,7 +265,7 @@ function incremental_backup
     local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
     if [[ $snapshot_check =~ 'no datasets available' ]] 
     then
-	    return false
+        return false
     fi
 
     local snapshot_size=$( ${ZFS} send --raw -nvPci $increment_from $snapshot | awk '/size/ {print $2}' )
@@ -307,7 +307,7 @@ function full_backup
     local snapshot_check=$( ${ZFS} list -t snapshot $snapshot )
     if [[ $snapshot_check =~ 'no datasets available' ]] 
     then
-	    return false
+        return false
     fi
 
     local snapshot_size=$( ${ZFS} send --raw -nvPc $snapshot | awk '/size/ {print $2}' )
@@ -429,30 +429,33 @@ function backup_dataset
 # Converts bytes value to human-readable string [$1: bytes value]
 function bytesToHumanReadable
 {
-	local i=${1:-0} d="" s=0 S=("Bytes" "KiB" "MiB" "GiB" "TiB" "PiB" "EiB" "YiB" "ZiB")
-	while ((i > 1024 && s < ${#S[@]}-1)); do
-		printf -v d ".%02d" $((i % 1024 * 100 / 1024))
-		i=$((i / 1024))
-		s=$((s + 1))
-	done
-	echo "$i$d ${S[$s]}"
+    local i=${1:-0} d="" s=0 S=("Bytes" "KiB" "MiB" "GiB" "TiB" "PiB" "EiB" "YiB" "ZiB")
+    while ((i > 1024 && s < ${#S[@]}-1)); do
+        printf -v d ".%02d" $((i % 1024 * 100 / 1024))
+        i=$((i / 1024))
+        s=$((s + 1))
+    done
+    echo "$i$d ${S[$s]}"
 }
 
 check_dep aws
 check_dep jq
 check_dep pv
 
+check_set "zfs command not found in PATH" $ZFS
+check_set "aws command not found in PATH" $AWS
+
 getopt -T > /dev/null
 if [ $? -eq 4 ]; then
-	# GNU enhanced getopt is available
-	GETOPT=$(getopt \
-		--longoptions=force,config:,debug,help,quiet,syslog,verbose \
-		--options=fc:dhqsv -- \
-		"$@" ) \
-		|| exit 128
+    # GNU enhanced getopt is available
+    GETOPT=$(getopt \
+        --longoptions=force,config:,debug,help,quiet,syslog,verbose \
+        --options=fc:dhqsv -- \
+        "$@" ) \
+        || exit 128
 else
-	# Original getopt is available (no long option names, no whitespace, no sorting)
-	GETOPT=$(getopt fc:dhqsv "$@") || exit 128
+    # Original getopt is available (no long option names, no whitespace, no sorting)
+    GETOPT=$(getopt fc:dhqsv "$@") || exit 128
 fi
 
 eval set -- "$GETOPT"
