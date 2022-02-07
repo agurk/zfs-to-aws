@@ -40,8 +40,8 @@ OPT_FORCE=0
 
 EXIT_STATUS=0
 
-ZFS=$(which zfs)
-AWS=$(which aws)
+readonly ZFS=$(which zfs)
+readonly AWS=$(which aws)
 
 function print_usage
 {
@@ -141,6 +141,7 @@ function load_config
     local in_ds=0
     local ds_name=''
     local ds_ss_types=$DEFAULT_SNAPSHOT_TYPES
+    local ds_ssinc_types=''
     local ds_max_inc=$DEFAULT_MAX_INCREMENTAL_BACKUPS
     local ds_inc_inc=$DEFAULT_INCREMENTAL_FROM_INCREMENTAL
 
@@ -174,12 +175,17 @@ function load_config
                 check_partial_uploads
             elif [[ $in_ds == 1 && $ds_name ]]
             then
-                print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
-                backup_dataset "$ds_name" "$ds_ss_types" "$ds_max_inc" "$ds_inc_inc"
+                if [[ -z $ds_ssinc_types ]]
+                then
+                    ds_ssinc_types=$ds_ss_types
+                fi
+                print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_ssinc_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
+                backup_dataset "$ds_name" "$ds_ss_types" "$ds_ssinc_types" "$ds_max_inc" "$ds_inc_inc"
             fi
             in_ds=1
             ds_name=''
             ds_ss_types=$DEFAULT_SNAPSHOT_TYPES
+            ds_ssinc_types=''
             ds_max_inc=$DEFAULT_MAX_INCREMENTAL_BACKUPS
             ds_inc_inc=$DEFAULT_INCREMENTAL_FROM_INCREMENTAL
         elif [[ $arg == 'name' ]]
@@ -188,6 +194,9 @@ function load_config
         elif [[ $arg == 'snapshot_types' ]]
         then
             ds_ss_types=$val
+        elif [[ $arg == 'snapshot_incremental_types' ]]
+        then
+            ds_ssinc_types=$val
         elif [[ $arg == 'max_incremental_backups' ]]
         then
             ds_max_inc=$val
@@ -201,8 +210,12 @@ function load_config
 
     if [[ $in_ds == 1 && $ds_name ]]
     then
-        print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
-        backup_dataset "$ds_name" "$ds_ss_types" "$ds_max_inc" "$ds_inc_inc"
+        if [[ -z $ds_ssinc_types ]]
+        then
+            ds_ssinc_types=$ds_ss_types
+        fi
+        print_log debug "Running dataset with: \"$ds_name\" \"$ds_ss_types\" \"$ds_ssinc_types\" \"$ds_max_inc\" \"$ds_inc_inc\""
+        backup_dataset "$ds_name" "$ds_ss_types" "$ds_ssinc_types" "$ds_max_inc" "$ds_inc_inc"
     fi
 }
 
@@ -348,32 +361,36 @@ function backup_dataset
     fi
 
     local snapshot_types=${2-$DEFAULT_SNAPSHOT_TYPES}
-    local max_incremental_backups=${3-$DEFAULT_MAX_INCREMENTAL_BACKUPS}
-    local incremental_from_incremental=${4-$DEFAULT_INCREMENTAL_FROM_INCREMENTAL}
+    local snapshot_incremental_types=${3-$DEFAULT_SNAPSHOT_TYPES}
+    local max_incremental_backups=${4-$DEFAULT_MAX_INCREMENTAL_BACKUPS}
+    local incremental_from_incremental=${5-$DEFAULT_INCREMENTAL_FROM_INCREMENTAL}
 
     print_log info ""
-    print_log info "Running backup for dataset: $dataset, ss_types: $snapshot_types, max_increment: $max_incremental_backups, inc_from_inc: $incremental_from_incremental"
+    print_log info "Running backup for dataset: $dataset, ss_types: $snapshot_types, ss_inctypes: $snapshot_incremental_types, max_increment: $max_incremental_backups, inc_from_inc: $incremental_from_incremental"
 
     local backup_path="$BACKUP_PATH/$dataset"
     check_aws_folder $backup_path
 
     local latest_remote_file=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3 ls $BUCKET/$backup_path/ | grep -v \/\$ | sort -r | head -1 | awk '{print $4}' )
     # todo: check if completed correctly
-    local latest_snapshot=$( ${ZFS} list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
-    local latest_snapshot_time=$( ${ZFS} list -Ht snap -o creation -p $latest_snapshot )
-    local remote_filename=$( echo $latest_snapshot | sed 's/\//./g' )
+    local latest_full_snapshot=$( ${ZFS} list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_types | sort -n -k2 | tail -1 | awk '{print $1}' )
+    local latest_incremental_snapshot=$( ${ZFS} list -Ht snap -o name,creation -p |grep "^$dataset@"| grep $snapshot_incremental_types | sort -n -k2 | tail -1 | awk '{print $1}' )
+    local latest_full_snapshot_time=$( ${ZFS} list -Ht snap -o creation -p $latest_full_snapshot )
+    local latest_incremental_snapshot_time=$( ${ZFS} list -Ht snap -o creation -p $latest_incremental_snapshot )
+    local remote_full_filename=$( echo $latest_full_snapshot | sed 's/\//./g' )
+    local remote_incrumental_filename=$( echo $latest_incremental_snapshot | sed 's/\//./g' )
 
-    if [[ -z $latest_snapshot ]]
+    # If there are no matches for this, there is no point looking for the possibility of an
+    # incremental upload as it should be based off of this (or one like it). If doing increment on an increment
+    # it might be ok, but for now let's assume it's not
+    if [[ -z $latest_full_snapshot ]]
     then
-        print_log error "No snapshots found for $dataset"
+        print_log error "No full snapshots found for $dataset"
         EXIT_STATUS=1
     elif [[ -z $latest_remote_file ]]
     then
-        print_log info "No remote file for $dataset found"
-        full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
-    #elif [[ $latest_remote_file == $remote_filename ]]
-    #then
-    #    print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
+        print_log info "No remote file for $dataset found. Performing full backup"
+        full_backup $latest_full_snapshot $backup_path $remote_full_filename $latest_full_snapshot_time
     else
         # todo: check if completed correctly
         local remote_meta=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api head-object --bucket $BUCKET --key $backup_path/$latest_remote_file )
@@ -384,6 +401,7 @@ function backup_dataset
         local script_version=$(echo $remote_meta | jq -r ".Metadata.\"$META_SCRIPT_VERSION\"")
         local increment_from_filename=$latest_remote_file
         local completed_upload=$( $AWS $PREFIX_ENDPOINT $ENDPOINT_URL s3api get-object-tagging --bucket $BUCKET --key $backup_path/$latest_remote_file | jq -r '.TagSet[] | select(.Key == "upload_state") | .Value' )
+        local do_incremental_backup=1
 
         if [[ $OPT_FORCE -eq 0 && $completed_upload != $META_COMPLETE_VALUE ]]
         then
@@ -391,9 +409,6 @@ function backup_dataset
             # would be a better course of action at this stage (choose older? full backup?)
             print_log critical "Latest server upload $latest_remote_file either failed or still in progress"
             EXIT_STATUS=1
-        elif [[ $latest_remote_file == $remote_filename ]]
-        then
-            print_log notice "$dataset remote backup is already at current version ($latest_snapshot)"
         elif [[ $OPT_FORCE -eq 0 && $script_version != "$SCRIPT_VERSION" ]]
         then
             print_log critical "Previous upload $latest_remote_file from version $script_version (current version: $SCRIPT_VERSION)"
@@ -406,7 +421,7 @@ function backup_dataset
                 increment_from_filename=$last_full_filename
             elif [[ -z $( ${ZFS} list -Ht snap -o name | grep "^$increment_from$" ) ]]
             then
-                print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot"
+                print_log error "Previous snapshot missing ($increment_from) for $dataset reverting to last known full snapshot ($last_full)"
                 increment_from=$last_full
                 increment_from_filename=$last_full_filename
             fi
@@ -414,13 +429,45 @@ function backup_dataset
             if [[ $backup_seq -gt $max_incremental_backups ]]
             then
                 print_log notice "Max number of incrementals reached for $dataset"
-                full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
+                do_incremental_backup=0
             elif [[ -z $( ${ZFS} list -Ht snap -o name | grep "^$increment_from$" ) ]]
             then
-                print_log error "Previous full snapshot ($increment_from) missing, reverting to full snapshot"
-                full_backup $latest_snapshot $backup_path $remote_filename $latest_snapshot_time
+                print_log error "Previous snapshot ($increment_from) missing, reverting to full snapshot"
+                do_incremental_backup=0
+            elif [[ -z $latest_incremental_snapshot ]]
+            then
+                print_log info "Unable to find any matching/in-scope incremental snapshots, performing full snapshot"
+                do_incremental_backup=0
+            fi
+
+            if [[ $do_incremental_backup -ne 0 ]]
+            then
+                if [[ $latest_remote_file == $remote_incrumental_filename ]]
+                then
+                    print_log notice "$dataset remote backup is already at current version ($latest_incremental_snapshot)"
+                else
+                    print_log debug "Doing incremental backup from increment $latest_incremental_snapshot from $latest_full_snapshot"
+                    incremental_backup $latest_incremental_snapshot \
+                        $backup_path \
+                        $remote_incrumental_filename \
+                        $last_full \
+                        $last_full_filename \
+                        $increment_from \
+                        $increment_from_filename \
+                        $backup_seq \
+                        $latest_incremental_snapshot_time
+                fi
             else
-                incremental_backup $latest_snapshot $backup_path $remote_filename $last_full $last_full_filename $increment_from $increment_from_filename $backup_seq $latest_snapshot_time
+                if [[ $latest_remote_file == $remote_full_filename ]]
+                then
+                    print_log notice "$dataset remote backup is already at current version ($latest_full_snapshot)"
+                else
+                    print_log debug "Doing full backup from $latest_full_snapshot"
+                    full_backup $latest_full_snapshot \
+                        $backup_path \
+                        $remote_full_filename \
+                        $latest_full_snapshot_time
+                fi
             fi
         fi
     fi
